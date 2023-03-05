@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // Errors
@@ -380,10 +381,50 @@ func sameTree(p1, p2 []string) bool {
 
 const stackArraySize = 128
 
-func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]string) int {
+type Byter struct {
+	data []byte
+	sem  chan int
+}
+
+func NewByter(data []byte) *Byter {
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	sem := make(chan int, 10)
+
+	go func() {
+		select {
+		case <-ticker.C:
+			<-sem
+		}
+	}()
+
+	return &Byter{
+		data: data,
+		sem:  sem,
+	}
+}
+
+func (b *Byter) len() int {
+	return len(b.data)
+}
+
+func (b *Byter) get(i int) byte {
+	b.sem <- 0
+	return b.data[i]
+}
+
+func (b *Byter) get_slice(i int) []byte {
+	return b.data[i:]
+}
+
+func (b *Byter) get_range(i int, j int) []byte {
+	return b.data[i:j]
+}
+
+func EachKey(data *Byter, cb func(int, []byte, ValueType, error), paths ...[]string) int {
 	var x struct{}
 	var level, pathsMatched, i int
-	ln := len(data)
+	ln := data.len()
 
 	pathFlags := make([]bool, stackArraySize)[:]
 	if len(paths) > cap(pathFlags) {
@@ -405,12 +446,12 @@ func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]str
 	pathsBuf = pathsBuf[0:maxPath]
 
 	for i < ln {
-		switch data[i] {
+		switch data.get(i) {
 		case '"':
 			i++
 			keyBegin := i
 
-			strEnd, keyEscaped := stringEnd(data[i:])
+			strEnd, keyEscaped := stringEnd(data.get_slice(i))
 			if strEnd == -1 {
 				return -1
 			}
@@ -418,7 +459,7 @@ func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]str
 
 			keyEnd := i - 1
 
-			valueOffset := nextToken(data[i:])
+			valueOffset := nextToken(data.get_slice(i))
 			if valueOffset == -1 {
 				return -1
 			}
@@ -426,9 +467,9 @@ func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]str
 			i += valueOffset
 
 			// if string is a key, and key level match
-			if data[i] == ':' {
+			if data.get(i) == ':' {
 				match := -1
-				key := data[keyBegin:keyEnd]
+				key := data.get_range(keyBegin, keyEnd)
 
 				// for unescape: if there are no escape sequences, this is cheap; if there are, it is a
 				// bit more expensive, but causes no allocations unless len(key) > unescapeStackBufSize
@@ -461,7 +502,7 @@ func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]str
 						pathsMatched++
 						pathFlags[pi] = true
 
-						v, dt, _, e := Get(data[i+1:])
+						v, dt, _, e := Get(data.get_slice(i + 1))
 						cb(pi, v, dt, e)
 
 						if pathsMatched == len(paths) {
@@ -474,17 +515,17 @@ func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]str
 				}
 
 				if match == -1 {
-					tokenOffset := nextToken(data[i+1:])
+					tokenOffset := nextToken(data.get_slice(i + 1))
 					i += tokenOffset
 
-					if data[i] == '{' {
-						blockSkip := blockEnd(data[i:], '{', '}')
+					if data.get(i) == '{' {
+						blockSkip := blockEnd(data.get_slice(i), '{', '}')
 						i += blockSkip + 1
 					}
 				}
 
 				if i < ln {
-					switch data[i] {
+					switch data.get(i) {
 					case '{', '}', '[', '"':
 						i--
 					}
@@ -526,7 +567,7 @@ func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]str
 				level++
 
 				var curIdx int
-				arrOff, _ := ArrayEach(data[i:], func(value []byte, dataType ValueType, offset int, err error) {
+				arrOff, _ := ArrayEach(data.get_slice(i), func(value []byte, dataType ValueType, offset int, err error) {
 					if _, ok = arrIdxFlags[curIdx]; ok {
 						for pi, p := range paths {
 							if pIdxFlags[pi] {
@@ -557,7 +598,7 @@ func EachKey(data []byte, cb func(int, []byte, ValueType, error), paths ...[]str
 				i += arrOff - 1
 			} else {
 				// Do not search for keys inside arrays
-				if arraySkip := blockEnd(data[i:], '[', ']'); arraySkip == -1 {
+				if arraySkip := blockEnd(data.get_slice(i), '[', ']'); arraySkip == -1 {
 					return -1
 				} else {
 					i += arraySkip - 1
@@ -707,12 +748,10 @@ func WriteToBuffer(buffer []byte, str string) int {
 }
 
 /*
-
 Del - Receives existing data structure, path to delete.
 
 Returns:
 `data` - return modified data
-
 */
 func Delete(data []byte, keys ...string) []byte {
 	lk := len(keys)
@@ -793,13 +832,11 @@ func Delete(data []byte, keys ...string) []byte {
 }
 
 /*
-
 Set - Receives existing data structure, path to set, and data to set at that key.
 
 Returns:
 `value` - modified byte array
 `err` - On any parsing error
-
 */
 func Set(data []byte, setValue []byte, keys ...string) (value []byte, err error) {
 	// ensure keys are set
